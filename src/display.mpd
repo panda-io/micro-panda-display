@@ -1,14 +1,4 @@
-// panda_display — shared display config and API contract
-//
-// Usage:
-//   1. import a display variant (e.g. ssd1306_128x32::*)
-//   2. import gfx::*
-//   3. fill display_conn() with your wiring
-//   4. call display_attach_gfx(gfx_driver())
-//   5. call gfx_init()
-//
-// Each display variant implements display_attach_gfx(driver: &GfxDriver).
-// It fills the GfxDriver table, initialises the hardware, and sets DisplayInfo.
+// panda_display — shared display config and connection types
 
 // ── enums ─────────────────────────────────────────────────────────────────────
 
@@ -21,7 +11,7 @@ enum DisplayColor
     RGB565 = 1   // 16-bit colour (5R 6G 5B)
 
 // ── app-filled connection config ──────────────────────────────────────────────
-// User fills this with their wiring before calling display_attach_gfx().
+// User fills this with their wiring before calling attach_*().
 
 class DisplayConn
     var interface:      DisplayInterface
@@ -29,12 +19,3 @@ class DisplayConn
     var dc_pin:         i32   // data/command pin (SPI only; set -1 for I2C)
     var reset_pin:      i32   // hardware reset pin (-1 = not used)
     var back_light_pin: i32   // backlight pin      (-1 = not used)
-
-// ── driver-filled display info ────────────────────────────────────────────────
-// Display variant fills this inside display_attach_gfx().
-
-class DisplayInfo
-    var width:  i32
-    var height: i32
-    var color:  DisplayColor
-
