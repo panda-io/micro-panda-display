@@ -38,15 +38,3 @@ class DisplayInfo
     var height: i32
     var color:  DisplayColor
 
-// ── singletons ────────────────────────────────────────────────────────────────
-
-var _conn: DisplayConn
-var _info: DisplayInfo
-
-// Return reference to the connection config. App fills before attach.
-fun display_conn() &DisplayConn
-    return &_conn
-
-// Return reference to the display info. Valid after display_attach_gfx().
-fun display_info() &DisplayInfo
-    return &_info
