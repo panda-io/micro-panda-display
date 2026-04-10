@@ -17,7 +17,7 @@ import i2c::*
 import gpio::*
 import mcu32.allocator::Allocator
 
-val HEAP_SIZE := 528    // fits 128×32 page_buf (513 B) plus allocator alignment; 128×64 writes in 2 passes
+val BUF_SIZE := 528    // fits 128×32 page_buf (513 B) plus allocator alignment; 128×64 writes in 2 passes
 
 fun _set_rotation(handle: &void, r: Rotation)
     &Ssd1306(handle)._set_rotation(r)
@@ -31,14 +31,13 @@ fun _flush(handle: &void, rect: &Rect, buf: byte[])
 // ── device instance ───────────────────────────────────────────────────────────
 
 class Ssd1306
-    var heap:      u8[HEAP_SIZE]   // allocator backing memory
-    var strip:     u8[512]         // 1-bpp mono framebuffer (128×32)
+    var strip:     byte[512]         // 1-bpp mono framebuffer (128×32)
     var driver:    GraphicsDriver
     var gfx:       Graphics
     var _dev:      int
     var _width:    int
     var _height:   int
-    var _page_buf: byte[]
+    var _page_buf: byte[BUF_SIZE]
 
     fun _set_rotation(r: Rotation)
         // SSD1306 has no hardware rotation; handled by the GFX layer
@@ -116,74 +115,50 @@ fun _cmd2(dev: int, c: int, v: int) int
 
 // ── hardware init sequences ────────────────────────────────────────────────────
 
-fun _hw_init_128x32(dev: int)
-    _cmd1(dev, 0xAE)        // display off
-    _cmd2(dev, 0xD5, 0x80)  // clock divide ratio / oscillator frequency
-    _cmd2(dev, 0xA8, 0x1F)  // multiplex ratio: 31 (32 rows)
-    _cmd2(dev, 0xD3, 0x00)  // display offset: 0
-    _cmd1(dev, 0x40)        // display start line: 0
-    _cmd2(dev, 0x8D, 0x14)  // charge pump: enable
-    _cmd2(dev, 0x20, 0x00)  // memory addressing: horizontal
-    _cmd1(dev, 0xA1)        // segment re-map
-    _cmd1(dev, 0xC8)        // COM scan: reverse
-    _cmd2(dev, 0xDA, 0x02)  // COM pins: sequential, no remap (128×32)
-    _cmd2(dev, 0x81, 0xCF)  // contrast
-    _cmd2(dev, 0xD9, 0xF1)  // pre-charge period
-    _cmd2(dev, 0xDB, 0x40)  // VCOMH deselect
-    _cmd1(dev, 0xA4)        // output follows RAM
-    _cmd1(dev, 0xA6)        // normal display (not inverted)
-    _cmd1(dev, 0xAF)        // display on
-
-fun _hw_init_128x64(dev: int)
-    _cmd1(dev, 0xAE)        // display off
-    _cmd2(dev, 0xD5, 0x80)  // clock divide ratio / oscillator frequency
-    _cmd2(dev, 0xA8, 0x3F)  // multiplex ratio: 63 (64 rows)
-    _cmd2(dev, 0xD3, 0x00)  // display offset: 0
-    _cmd1(dev, 0x40)        // display start line: 0
-    _cmd2(dev, 0x8D, 0x14)  // charge pump: enable
-    _cmd2(dev, 0x20, 0x00)  // memory addressing: horizontal
-    _cmd1(dev, 0xA1)        // segment re-map
-    _cmd1(dev, 0xC8)        // COM scan: reverse
-    _cmd2(dev, 0xDA, 0x12)  // COM pins: alternative configuration (128×64)
-    _cmd2(dev, 0x81, 0xCF)  // contrast
-    _cmd2(dev, 0xD9, 0xF1)  // pre-charge period
-    _cmd2(dev, 0xDB, 0x40)  // VCOMH deselect
-    _cmd1(dev, 0xA4)        // output follows RAM
-    _cmd1(dev, 0xA6)        // normal display (not inverted)
-    _cmd1(dev, 0xAF)        // display on
+fun _hw_init(dev: int, rows: int)
+    _cmd1(dev, 0xAE)            // display off
+    _cmd2(dev, 0xD5, 0x80)      // clock divide ratio / oscillator frequency
+    _cmd2(dev, 0xA8, rows - 1)  // multiplex ratio: 31 (32 rows)
+    _cmd2(dev, 0xD3, 0x00)      // display offset: 0
+    _cmd1(dev, 0x40)            // display start line: 0
+    _cmd2(dev, 0x8D, 0x14)      // charge pump: enable
+    _cmd2(dev, 0x20, 0x00)      // memory addressing: horizontal
+    _cmd1(dev, 0xA1)            // segment re-map
+    _cmd1(dev, 0xC8)            // COM scan: reverse
+    _cmd2(dev, 0xDA, 0x02)      // COM pins: sequential, no remap (128×32)
+    _cmd2(dev, 0x81, 0xCF)      // contrast
+    _cmd2(dev, 0xD9, 0xF1)      // pre-charge period
+    _cmd2(dev, 0xDB, 0x40)      // VCOMH deselect
+    _cmd1(dev, 0xA4)            // output follows RAM
+    _cmd1(dev, 0xA6)            // normal display (not inverted)
+    _cmd1(dev, 0xAF)            // display on
 
 // ── shared attach logic ────────────────────────────────────────────────────────
 
-fun _attach(d: &Ssd1306, conn: &DisplayConn, w: int, h: int)
-    var alloc: Allocator
-    alloc.init(d.heap)
-    d._dev    = conn.device
-    d._width  = w
-    d._height = h
-    val buf_size := 1 + 4 * w       // always 4 pages (32 rows); 128×64 reuses via 2 passes
-    d._page_buf    = alloc.allocate_array<byte>(buf_size)
-    d._page_buf[0] = 0x40
+fun _attach(display: &Ssd1306, conn: &DisplayConn, width: int, height: int)
+    display._dev    = conn.device
+    display._width  = width
+    display._height = height
+    display._page_buf[0] = 0x40
 
     if conn.reset_pin >= 0
         gpio_mode(conn.reset_pin, GpioMode.OUTPUT)
         gpio_write(conn.reset_pin, GpioLevel.LOW)
         gpio_write(conn.reset_pin, GpioLevel.HIGH)
 
-    d.driver.width        = w
-    d.driver.height       = h
-    d.driver.handle       = &void(d)
-    d.driver.set_rotation = _set_rotation
-    d.driver.wait         = _wait
-    d.driver.flush        = _flush
+    display.driver.width        = width
+    display.driver.height       = height
+    display.driver.handle       = &void(display)
+    display.driver.set_rotation = _set_rotation
+    display.driver.wait         = _wait
+    display.driver.flush        = _flush
 
 // ── variant attach functions ───────────────────────────────────────────────────
 
-fun attach_ssd1306_128x32(d: &Ssd1306, conn: &DisplayConn) &Ssd1306
-    _attach(d, conn, 128, 32)
-    _hw_init_128x32(conn.device)
-    return d
+fun attach_ssd1306_128x32(display: &Ssd1306, conn: &DisplayConn)
+    _attach(display, conn, 128, 32)
+    _hw_init(conn.device, 32)
 
-fun attach_ssd1306_128x64(d: &Ssd1306, conn: &DisplayConn) &Ssd1306
-    _attach(d, conn, 128, 64)
-    _hw_init_128x64(conn.device)
-    return d
+fun attach_ssd1306_128x64(display: &Ssd1306, conn: &DisplayConn)
+    _attach(display, conn, 128, 64)
+    _hw_init(conn.device, 64)
