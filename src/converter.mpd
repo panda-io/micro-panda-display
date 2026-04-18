@@ -189,7 +189,7 @@ fun _pack(idx: byte[], w: int, h: int, bits: int, out: byte[])
             if bits == 1
                 val bi := y * ((w + 7) / 8) + x / 8
                 val sh := 7 - (x & 7)
-                if ci & 1 != 0
+                if (ci & 1) != 0
                     out[bi] = byte(int(out[bi]) | (1 << sh))
             else if bits == 2
                 val bi := y * ((w + 3) / 4) + x / 4
@@ -213,7 +213,7 @@ fun _crc_init()
     for i in 0..256
         var c := u32(i)
         for j in 0..8
-            if c & u32(1) != u32(0)
+            if (c & u32(1)) != u32(0)
                 c = poly ^ (c >> u32(1))
             else
                 c = c >> u32(1)
@@ -259,16 +259,31 @@ fun _write_pal_png(path: byte[], n: int) bool
         return false
 
     var sig: byte[8]
-    sig[0] = byte(137)  sig[1] = byte(80)  sig[2] = byte(78)  sig[3] = byte(71)
-    sig[4] = byte(13)   sig[5] = byte(10)  sig[6] = byte(26)  sig[7] = byte(10)
+    sig[0] = byte(137)
+    sig[1] = byte(80)
+    sig[2] = byte(78)
+    sig[3] = byte(71)
+    sig[4] = byte(13)
+    sig[5] = byte(10)
+    sig[6] = byte(26)
+    sig[7] = byte(10)
     _pal_file.write_bytes(sig)
 
     var ihdr: byte[13]
     val w := u32(n)
-    ihdr[0] = byte(w >> u32(24))  ihdr[1] = byte(w >> u32(16))
-    ihdr[2] = byte(w >> u32(8))   ihdr[3] = byte(w)
-    ihdr[4] = 0  ihdr[5] = 0  ihdr[6] = 0  ihdr[7] = 1
-    ihdr[8] = 8  ihdr[9] = 2  ihdr[10] = 0  ihdr[11] = 0  ihdr[12] = 0
+    ihdr[0] = byte(w >> u32(24))
+    ihdr[1] = byte(w >> u32(16))
+    ihdr[2] = byte(w >> u32(8))
+    ihdr[3] = byte(w)
+    ihdr[4] = 0
+    ihdr[5] = 0
+    ihdr[6] = 0
+    ihdr[7] = 1
+    ihdr[8] = 8
+    ihdr[9] = 2
+    ihdr[10] = 0
+    ihdr[11] = 0
+    ihdr[12] = 0
     _write_chunk(&_pal_file, "IHDR", ihdr)
 
     val scan_len := 1 + n * 3
@@ -291,15 +306,22 @@ fun _write_pal_png(path: byte[], n: int) bool
         return false
 
     var zi: int = 0
-    zlib[zi] = byte(0x78)  zi += 1
-    zlib[zi] = byte(0x01)  zi += 1
-    zlib[zi] = byte(0x01)  zi += 1
+    zlib[zi] = byte(0x78)
+    zi += 1
+    zlib[zi] = byte(0x01)
+    zi += 1
+    zlib[zi] = byte(0x01)
+    zi += 1
     val blen := int(scan_len)
-    zlib[zi] = byte(blen & 0xFF)          zi += 1
-    zlib[zi] = byte((blen >> 8) & 0xFF)   zi += 1
+    zlib[zi] = byte(blen & 0xFF)
+    zi += 1
+    zlib[zi] = byte((blen >> 8) & 0xFF)
+    zi += 1
     val nlen := ~blen
-    zlib[zi] = byte(nlen & 0xFF)          zi += 1
-    zlib[zi] = byte((nlen >> 8) & 0xFF)   zi += 1
+    zlib[zi] = byte(nlen & 0xFF)
+    zi += 1
+    zlib[zi] = byte((nlen >> 8) & 0xFF)
+    zi += 1
     for i in 0..scan_len
         zlib[zi + i] = scan[i]
     zi += scan_len
@@ -357,7 +379,10 @@ fun _to_ident(inp: byte[], out: byte[]) int
         j -= 1
     out[j] = 0
     if j == 0
-        out[0] = 'i'  out[1] = 'm'  out[2] = 'g'  out[3] = 0
+        out[0] = 'i'
+        out[1] = 'm'
+        out[2] = 'g'
+        out[3] = 0
         return 3
     return j
 
@@ -376,7 +401,8 @@ fun _append_int(buf: byte[], pos: int, v: int) int
 fun _default_path(base: byte[], bits: int, buf: byte[]) byte[]
     var p: int = 0
     p = _append_str(buf, p, base)
-    buf[p] = '_'  p += 1
+    buf[p] = '_'
+    p += 1
     p = _append_int(buf, p, bits)
     p = _append_str(buf, p, "bit.mpd")
     buf[p] = 0
