@@ -1,0 +1,571 @@
+import stb_image::stbi_load
+import stb_image::stbi_image_free
+import hosted.allocator::HeapAllocator
+import hosted.file
+import string
+import console
+
+#if HOSTED
+
+// ─── module-level storage ────────────────────────────────────────────────────
+
+val _heap: HeapAllocator
+
+var _pal_r: byte[256]
+var _pal_g: byte[256]
+var _pal_b: byte[256]
+
+var _bkt_start: int[256]
+var _bkt_count: int[256]
+
+var _crc_tbl: u32[256]
+var _crc_ready: bool = false
+
+var _int_buf: byte[24]
+
+val _out_file: file.File
+val _pal_file: file.File
+
+// ─── RGB565 ──────────────────────────────────────────────────────────────────
+
+fun _rgb565(r: byte, g: byte, b: byte) u16
+    return (u16(r >> 3) << 11) | (u16(g >> 2) << 5) | u16(b >> 3)
+
+// ─── Hex formatting ──────────────────────────────────────────────────────────
+
+fun _hex_char(v: byte) byte
+    if v < byte(10)
+        return byte('0') + v
+    return byte('A') + (v - byte(10))
+
+fun _write_hex_u8(f: &file.File, v: byte)
+    var b: byte[4]
+    b[0] = '0'
+    b[1] = 'x'
+    b[2] = _hex_char(byte(int(v) >> 4))
+    b[3] = _hex_char(v & byte(0x0F))
+    f.write_bytes(b)
+
+fun _write_hex_u16(f: &file.File, v: u16)
+    var b: byte[6]
+    b[0] = '0'
+    b[1] = 'x'
+    b[2] = _hex_char(byte(int(v) >> 12))
+    b[3] = _hex_char(byte((int(v) >> 8) & 0xF))
+    b[4] = _hex_char(byte((int(v) >> 4) & 0xF))
+    b[5] = _hex_char(byte(int(v) & 0xF))
+    f.write_bytes(b)
+
+fun _write_int(f: &file.File, v: int)
+    val n := string.format_int(_int_buf, v)
+    f.write_bytes({_int_buf.ptr, n})
+
+// ─── Nearest palette entry ───────────────────────────────────────────────────
+
+fun _nearest(r: byte, g: byte, b: byte, size: int) int
+    var best: int = 0
+    var best_d: int = 0x7FFFFFFF
+    for i in 0..size
+        val dr := int(r) - int(_pal_r[i])
+        val dg := int(g) - int(_pal_g[i])
+        val db := int(b) - int(_pal_b[i])
+        val d := dr*dr + dg*dg + db*db
+        if d < best_d
+            best_d = d
+            best = i
+    return best
+
+// ─── Insertion sort subrange of interleaved RGB pixel buffer ─────────────────
+// Pixels are stored as RGBRGB... in a flat byte slice; ch selects sort channel.
+
+fun _sort_px(buf: byte[], start: int, count: int, ch: int)
+    for i in 1..count
+        val si := (start + i) * 3
+        val kr := buf[si]
+        val kg := buf[si + 1]
+        val kb := buf[si + 2]
+        val key := int(buf[si + ch])
+        var j := i - 1
+        while j >= 0
+            val ji := (start + j) * 3
+            if int(buf[ji + ch]) <= key
+                break
+            buf[ji + 3] = buf[ji]
+            buf[ji + 4] = buf[ji + 1]
+            buf[ji + 5] = buf[ji + 2]
+            j -= 1
+        val di := (start + j + 1) * 3
+        buf[di]     = kr
+        buf[di + 1] = kg
+        buf[di + 2] = kb
+
+// ─── Median-cut palette generation ───────────────────────────────────────────
+
+fun _median_cut(buf: byte[], count: int, pal_size: int)
+    _bkt_start[0] = 0
+    _bkt_count[0] = count
+    var n: int = 1
+
+    while n < pal_size
+        var si: int = 0
+        for i in 1..n
+            if _bkt_count[i] > _bkt_count[si]
+                si = i
+        if _bkt_count[si] <= 1
+            break
+
+        val bs := _bkt_start[si]
+        val bc := _bkt_count[si]
+
+        var mn_r: byte = 255
+        var mx_r: byte = 0
+        var mn_g: byte = 255
+        var mx_g: byte = 0
+        var mn_b: byte = 255
+        var mx_b: byte = 0
+        for i in 0..bc
+            val base := (bs + i) * 3
+            if buf[base] < mn_r
+                mn_r = buf[base]
+            if buf[base] > mx_r
+                mx_r = buf[base]
+            if buf[base + 1] < mn_g
+                mn_g = buf[base + 1]
+            if buf[base + 1] > mx_g
+                mx_g = buf[base + 1]
+            if buf[base + 2] < mn_b
+                mn_b = buf[base + 2]
+            if buf[base + 2] > mx_b
+                mx_b = buf[base + 2]
+
+        val rr := int(mx_r) - int(mn_r)
+        val rg := int(mx_g) - int(mn_g)
+        val rb := int(mx_b) - int(mn_b)
+        var ch: int = 2
+        if rr >= rg && rr >= rb
+            ch = 0
+        else if rg >= rb
+            ch = 1
+
+        _sort_px(buf, bs, bc, ch)
+
+        val mid := bc / 2
+        _bkt_start[n] = bs + mid
+        _bkt_count[n] = bc - mid
+        _bkt_count[si] = mid
+        n += 1
+
+    for i in 0..n
+        if _bkt_count[i] == 0
+            _pal_r[i] = 0
+            _pal_g[i] = 0
+            _pal_b[i] = 0
+        else
+            var sr: i64 = 0
+            var sg: i64 = 0
+            var sb: i64 = 0
+            val bs2 := _bkt_start[i]
+            for j in 0.._bkt_count[i]
+                val base := (bs2 + j) * 3
+                sr += i64(buf[base])
+                sg += i64(buf[base + 1])
+                sb += i64(buf[base + 2])
+            val c := i64(_bkt_count[i])
+            _pal_r[i] = byte(sr / c)
+            _pal_g[i] = byte(sg / c)
+            _pal_b[i] = byte(sb / c)
+    for i in n..pal_size
+        _pal_r[i] = 0
+        _pal_g[i] = 0
+        _pal_b[i] = 0
+
+// ─── Pixel packing ───────────────────────────────────────────────────────────
+// Bit layout matches gfx canvas.mpd exactly (MSB-first, packed rows).
+
+fun _pack(idx: byte[], w: int, h: int, bits: int, out: byte[])
+    for y in 0..h
+        for x in 0..w
+            val ci := int(idx[y * w + x])
+            if bits == 1
+                val bi := y * ((w + 7) / 8) + x / 8
+                val sh := 7 - (x & 7)
+                if ci & 1 != 0
+                    out[bi] = byte(int(out[bi]) | (1 << sh))
+            else if bits == 2
+                val bi := y * ((w + 3) / 4) + x / 4
+                val sh := (3 - (x & 3)) * 2
+                out[bi] = byte((int(out[bi]) & ~(0x03 << sh)) | ((ci & 0x03) << sh))
+            else if bits == 4
+                val bi := y * ((w + 1) / 2) + x / 2
+                if (x & 1) == 0
+                    out[bi] = byte((int(out[bi]) & 0x0F) | ((ci & 0x0F) << 4))
+                else
+                    out[bi] = byte((int(out[bi]) & 0xF0) | (ci & 0x0F))
+            else
+                out[y * w + x] = byte(ci)
+
+// ─── CRC32 ───────────────────────────────────────────────────────────────────
+
+fun _crc_init()
+    if _crc_ready
+        return
+    val poly: u32 = (u32(0xEDB8) << u32(16)) | u32(0x8320)
+    for i in 0..256
+        var c := u32(i)
+        for j in 0..8
+            if c & u32(1) != u32(0)
+                c = poly ^ (c >> u32(1))
+            else
+                c = c >> u32(1)
+        _crc_tbl[i] = c
+    _crc_ready = true
+
+// ─── Adler-32 ────────────────────────────────────────────────────────────────
+
+fun _adler32(data: byte[], len: int) u32
+    var s1: u32 = 1
+    var s2: u32 = 0
+    val mod: u32 = 65521
+    for i in 0..len
+        s1 = (s1 + u32(data[i])) % mod
+        s2 = (s2 + s1) % mod
+    return (s2 << u32(16)) | s1
+
+// ─── PNG writing ─────────────────────────────────────────────────────────────
+
+fun _write_u32_be(f: &file.File, v: u32)
+    var b: byte[4]
+    b[0] = byte(v >> u32(24))
+    b[1] = byte(v >> u32(16))
+    b[2] = byte(v >> u32(8))
+    b[3] = byte(v)
+    f.write_bytes(b)
+
+fun _write_chunk(f: &file.File, ctype: byte[], data: byte[])
+    _write_u32_be(f, u32(data.size()))
+    f.write_bytes(ctype)
+    if data.size() > 0
+        f.write_bytes(data)
+    _crc_init()
+    var crc: u32 = ~u32(0)
+    for i in 0..ctype.size()
+        crc = _crc_tbl[int((crc ^ u32(ctype[i])) & u32(0xFF))] ^ (crc >> u32(8))
+    for i in 0..data.size()
+        crc = _crc_tbl[int((crc ^ u32(data[i])) & u32(0xFF))] ^ (crc >> u32(8))
+    _write_u32_be(f, crc ^ ~u32(0))
+
+fun _write_pal_png(path: byte[], n: int) bool
+    if !_pal_file.open(path, file.WRITE)
+        return false
+
+    var sig: byte[8]
+    sig[0] = byte(137)  sig[1] = byte(80)  sig[2] = byte(78)  sig[3] = byte(71)
+    sig[4] = byte(13)   sig[5] = byte(10)  sig[6] = byte(26)  sig[7] = byte(10)
+    _pal_file.write_bytes(sig)
+
+    var ihdr: byte[13]
+    val w := u32(n)
+    ihdr[0] = byte(w >> u32(24))  ihdr[1] = byte(w >> u32(16))
+    ihdr[2] = byte(w >> u32(8))   ihdr[3] = byte(w)
+    ihdr[4] = 0  ihdr[5] = 0  ihdr[6] = 0  ihdr[7] = 1
+    ihdr[8] = 8  ihdr[9] = 2  ihdr[10] = 0  ihdr[11] = 0  ihdr[12] = 0
+    _write_chunk(&_pal_file, "IHDR", ihdr)
+
+    val scan_len := 1 + n * 3
+    val scan := _heap.allocate_array<byte>(scan_len)
+    if scan.ptr == null
+        _pal_file.close()
+        return false
+    scan[0] = 0
+    for i in 0..n
+        scan[1 + i*3]     = _pal_r[i]
+        scan[1 + i*3 + 1] = _pal_g[i]
+        scan[1 + i*3 + 2] = _pal_b[i]
+
+    val adler := _adler32(scan, scan_len)
+    val zlen := 2 + 5 + scan_len + 4
+    val zlib := _heap.allocate_array<byte>(zlen)
+    if zlib.ptr == null
+        _heap.free_array<byte>(scan)
+        _pal_file.close()
+        return false
+
+    var zi: int = 0
+    zlib[zi] = byte(0x78)  zi += 1
+    zlib[zi] = byte(0x01)  zi += 1
+    zlib[zi] = byte(0x01)  zi += 1
+    val blen := int(scan_len)
+    zlib[zi] = byte(blen & 0xFF)          zi += 1
+    zlib[zi] = byte((blen >> 8) & 0xFF)   zi += 1
+    val nlen := ~blen
+    zlib[zi] = byte(nlen & 0xFF)          zi += 1
+    zlib[zi] = byte((nlen >> 8) & 0xFF)   zi += 1
+    for i in 0..scan_len
+        zlib[zi + i] = scan[i]
+    zi += scan_len
+    zlib[zi]     = byte(int(adler >> u32(24)) & 0xFF)
+    zlib[zi + 1] = byte(int(adler >> u32(16)) & 0xFF)
+    zlib[zi + 2] = byte(int(adler >> u32(8))  & 0xFF)
+    zlib[zi + 3] = byte(int(adler) & 0xFF)
+
+    _write_chunk(&_pal_file, "IDAT", {zlib.ptr, zlen})
+    _heap.free_array<byte>(zlib)
+    _heap.free_array<byte>(scan)
+    _write_chunk(&_pal_file, "IEND", "")
+    _pal_file.close()
+    return true
+
+// ─── String helpers ──────────────────────────────────────────────────────────
+
+fun _base_name(path: byte[], out: byte[]) int
+    var last_sep: int = -1
+    for i in 0..path.size()
+        if path[i] == '/' || path[i] == '\\'
+            last_sep = i
+    val start := last_sep + 1
+    var dot: int = -1
+    for i in start..path.size()
+        if path[i] == '.'
+            dot = i
+    var end_pos := path.size()
+    if dot > start
+        end_pos = dot
+    var copy_len := end_pos - start
+    if copy_len > out.size() - 1
+        copy_len = out.size() - 1
+    for i in 0..copy_len
+        out[i] = path[start + i]
+    out[copy_len] = 0
+    return copy_len
+
+fun _to_ident(inp: byte[], out: byte[]) int
+    var j: int = 0
+    val max := out.size() - 1
+    for i in 0..inp.size()
+        if j >= max
+            break
+        val c := inp[i]
+        val alpha := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+        val digit := c >= '0' && c <= '9'
+        if alpha || (digit && j > 0)
+            out[j] = c
+            j += 1
+        else if j > 0 && out[j - 1] != '_'
+            out[j] = '_'
+            j += 1
+    while j > 0 && out[j - 1] == '_'
+        j -= 1
+    out[j] = 0
+    if j == 0
+        out[0] = 'i'  out[1] = 'm'  out[2] = 'g'  out[3] = 0
+        return 3
+    return j
+
+fun _append_str(buf: byte[], pos: int, s: byte[]) int
+    var p := pos
+    for i in 0..s.size()
+        if p < buf.size() - 1
+            buf[p] = s[i]
+            p += 1
+    return p
+
+fun _append_int(buf: byte[], pos: int, v: int) int
+    val n := string.format_int(_int_buf, v)
+    return _append_str(buf, pos, {_int_buf.ptr, n})
+
+fun _default_path(base: byte[], bits: int, buf: byte[]) byte[]
+    var p: int = 0
+    p = _append_str(buf, p, base)
+    buf[p] = '_'  p += 1
+    p = _append_int(buf, p, bits)
+    p = _append_str(buf, p, "bit.mpd")
+    buf[p] = 0
+    return {buf.ptr, p}
+
+fun _fmt_name(bits: int) byte[]
+    if bits == 1
+        return "Index1"
+    if bits == 2
+        return "Index2"
+    if bits == 4
+        return "Index4"
+    return "Index8"
+
+// ─── MPD source writer ───────────────────────────────────────────────────────
+
+fun _write_mpd(f: &file.File, name: byte[], w: int, h: int, bits: int, pal_size: int, data: byte[])
+    f.write_string("// Generated by pimg — do not edit\n// ")
+    _write_int(f, w)
+    f.write_string("x")
+    _write_int(f, h)
+    f.write_string("  ")
+    _write_int(f, bits)
+    f.write_string("-bit  ")
+    _write_int(f, pal_size)
+    f.write_string(" colors\n\nimport graphics::IndexFormat\n\nval ")
+    f.write_string(name)
+    f.write_string("_palette: u16[")
+    _write_int(f, pal_size)
+    f.write_string("] = [\n")
+    for i in 0..pal_size
+        val c := _rgb565(_pal_r[i], _pal_g[i], _pal_b[i])
+        f.write_string("    ")
+        _write_hex_u16(f, c)
+        f.write_string(",  // ")
+        _write_int(f, i)
+        f.write_string("  rgb(")
+        _write_int(f, int(_pal_r[i]))
+        f.write_string(",")
+        _write_int(f, int(_pal_g[i]))
+        f.write_string(",")
+        _write_int(f, int(_pal_b[i]))
+        f.write_string(")\n")
+    f.write_string("]\n\nconst ")
+    f.write_string(name)
+    f.write_string("_data: byte[")
+    _write_int(f, data.size())
+    f.write_string("] = [\n")
+    for i in 0..data.size()
+        if i % 16 == 0
+            f.write_string("    ")
+        _write_hex_u8(f, data[i])
+        if i < data.size() - 1
+            f.write_string(", ")
+        if (i + 1) % 16 == 0 || i == data.size() - 1
+            f.write_string("\n")
+    f.write_string("]\n\nconst ")
+    f.write_string(name)
+    f.write_string("_width:  int = ")
+    _write_int(f, w)
+    f.write_string("\nconst ")
+    f.write_string(name)
+    f.write_string("_height: int = ")
+    _write_int(f, h)
+    f.write_string("\nval   ")
+    f.write_string(name)
+    f.write_string("_format: IndexFormat = IndexFormat.")
+    f.write_string(_fmt_name(bits))
+    f.write_string("\n")
+
+// ─── Core conversion ─────────────────────────────────────────────────────────
+
+fun _process(raw_pixels: &byte, iw: int, ih: int, bits: int,
+             input_path: byte[], pal_path: byte[], out_pal: byte[],
+             output: byte[], name: byte[]) int
+    val pixel_count := iw * ih
+    val pal_size := 1 << bits
+    val raw: byte[] = {raw_pixels, pixel_count * 3}
+
+    if pal_path.size() > 0
+        var pw: int = 0
+        var ph: int = 0
+        var pc: int = 0
+        val pd := stbi_load(pal_path, &pw, &ph, &pc, 3)
+        if pd == null
+            return 0
+        var n := pw
+        if n > pal_size
+            n = pal_size
+        val pd_raw: byte[] = {pd, n * 3}
+        for i in 0..n
+            _pal_r[i] = pd_raw[i * 3]
+            _pal_g[i] = pd_raw[i * 3 + 1]
+            _pal_b[i] = pd_raw[i * 3 + 2]
+        for i in n..pal_size
+            _pal_r[i] = 0
+            _pal_g[i] = 0
+            _pal_b[i] = 0
+        stbi_image_free(pd)
+    else
+        val tmp := _heap.allocate_array<byte>(pixel_count * 3)
+        if tmp.ptr == null
+            return 0
+        for i in 0..(pixel_count * 3)
+            tmp[i] = raw[i]
+        _median_cut(tmp, pixel_count, pal_size)
+        _heap.free_array<byte>(tmp)
+
+    val idx := _heap.allocate_array<byte>(pixel_count)
+    if idx.ptr == null
+        return 0
+    for i in 0..pixel_count
+        idx[i] = byte(_nearest(raw[i*3], raw[i*3+1], raw[i*3+2], pal_size))
+
+    var bpr := iw
+    if bits == 1
+        bpr = (iw + 7) / 8
+    else if bits == 2
+        bpr = (iw + 3) / 4
+    else if bits == 4
+        bpr = (iw + 1) / 2
+    val packed_size := bpr * ih
+    val packed := _heap.allocate_array<byte>(packed_size)
+    if packed.ptr == null
+        _heap.free_array<byte>(idx)
+        return 0
+    for i in 0..packed_size
+        packed[i] = 0
+    _pack(idx, iw, ih, bits, packed)
+    _heap.free_array<byte>(idx)
+
+    var base_buf: byte[256]
+    var ident_buf: byte[256]
+    var out_path_buf: byte[512]
+
+    val base_len := _base_name(input_path, base_buf)
+    val base_s: byte[] = {base_buf.ptr, base_len}
+    val ident_len := _to_ident(base_s, ident_buf)
+
+    var final_name := name
+    if name.size() == 0
+        final_name = {ident_buf.ptr, ident_len}
+
+    var final_output := output
+    if output.size() == 0
+        final_output = _default_path(base_s, bits, out_path_buf)
+
+    if !_out_file.open(final_output, file.WRITE)
+        _heap.free_array<byte>(packed)
+        return 0
+    _write_mpd(&_out_file, final_name, iw, ih, bits, pal_size, packed)
+    _out_file.close()
+
+    console.write_string("pimg: wrote '")
+    console.write_string(final_output)
+    console.write_string("' (")
+    console.write_int(iw)
+    console.write_string("x")
+    console.write_int(ih)
+    console.write_string(", ")
+    console.write_int(bits)
+    console.write_string("-bit, ")
+    console.write_int(packed_size)
+    console.write_string(" bytes data)\n")
+
+    if out_pal.size() > 0
+        if _write_pal_png(out_pal, pal_size)
+            console.write_string("pimg: wrote palette '")
+            console.write_string(out_pal)
+            console.write_string("'\n")
+        else
+            console.write_string("pimg: failed to write palette '")
+            console.write_string(out_pal)
+            console.write_string("'\n")
+
+    _heap.free_array<byte>(packed)
+    return 1
+
+// ─── Public API ──────────────────────────────────────────────────────────────
+
+fun convert(input: byte[], bits: int, pal: byte[], out_pal: byte[], output: byte[], name: byte[]) int
+    var iw: int = 0
+    var ih: int = 0
+    var ic: int = 0
+    val pixels := stbi_load(input, &iw, &ih, &ic, 3)
+    if pixels == null
+        return 0
+    val ok := _process(pixels, iw, ih, bits, input, pal, out_pal, output, name)
+    stbi_image_free(pixels)
+    return ok
+
+#end

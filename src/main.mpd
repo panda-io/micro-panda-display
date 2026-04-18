@@ -3,7 +3,7 @@ import string::equals
 import string::parse_u32
 import hosted.args::arg_count
 import hosted.args::arg_value
-import image_converter::convert
+import converter::convert
 
 fun main()
     if arg_count() < 2
