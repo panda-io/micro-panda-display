@@ -100,42 +100,49 @@ fun _file_exists(path: byte[]) bool
 
 @test
 fun test_convert_invalid_input()
-    val r := convert("/nonexistent/path/test.png", 8, "", "", "/tmp/pimg_out_invalid.mpd", "test")
+    val r := convert("/nonexistent/path/test.png", 8, "", "", "/tmp/pimg_out_invalid.mpd", "test", false)
     assert(r == 0)
 
 @test
 fun test_convert_1bit()
     assert(_write_1x1_red("/tmp/pimg_test_in.png"))
-    val r := convert("/tmp/pimg_test_in.png", 1, "", "", "/tmp/pimg_out_1bit.mpd", "img")
+    val r := convert("/tmp/pimg_test_in.png", 1, "", "", "/tmp/pimg_out_1bit.mpd", "img", false)
     assert(r == 1)
     assert(_file_exists("/tmp/pimg_out_1bit.mpd"))
 
 @test
 fun test_convert_2bit()
     assert(_write_1x1_red("/tmp/pimg_test_in.png"))
-    val r := convert("/tmp/pimg_test_in.png", 2, "", "", "/tmp/pimg_out_2bit.mpd", "img")
+    val r := convert("/tmp/pimg_test_in.png", 2, "", "", "/tmp/pimg_out_2bit.mpd", "img", false)
     assert(r == 1)
     assert(_file_exists("/tmp/pimg_out_2bit.mpd"))
 
 @test
 fun test_convert_4bit()
     assert(_write_1x1_red("/tmp/pimg_test_in.png"))
-    val r := convert("/tmp/pimg_test_in.png", 4, "", "", "/tmp/pimg_out_4bit.mpd", "img")
+    val r := convert("/tmp/pimg_test_in.png", 4, "", "", "/tmp/pimg_out_4bit.mpd", "img", false)
     assert(r == 1)
     assert(_file_exists("/tmp/pimg_out_4bit.mpd"))
 
 @test
 fun test_convert_8bit()
     assert(_write_1x1_red("/tmp/pimg_test_in.png"))
-    val r := convert("/tmp/pimg_test_in.png", 8, "", "", "/tmp/pimg_out_8bit.mpd", "img")
+    val r := convert("/tmp/pimg_test_in.png", 8, "", "", "/tmp/pimg_out_8bit.mpd", "img", false)
     assert(r == 1)
     assert(_file_exists("/tmp/pimg_out_8bit.mpd"))
 
 @test
 fun test_convert_palette_output()
     assert(_write_1x1_red("/tmp/pimg_test_in.png"))
-    val r := convert("/tmp/pimg_test_in.png", 4, "", "/tmp/pimg_pal_out.png", "/tmp/pimg_out_pal.mpd", "img")
+    val r := convert("/tmp/pimg_test_in.png", 4, "", "/tmp/pimg_pal_out.png", "/tmp/pimg_out_pal.mpd", "img", false)
     assert(r == 1)
     assert(_file_exists("/tmp/pimg_pal_out.png"))
+
+@test
+fun test_convert_rle()
+    assert(_write_1x1_red("/tmp/pimg_test_in.png"))
+    val r := convert("/tmp/pimg_test_in.png", 8, "", "", "/tmp/pimg_out_rle.mpd", "img", true)
+    assert(r == 1)
+    assert(_file_exists("/tmp/pimg_out_rle.mpd"))
 
 #end

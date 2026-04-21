@@ -16,6 +16,7 @@ fun main()
     var out_palette: byte[] = ""
     var output: byte[] = ""
     var name: byte[] = ""
+    var rle: bool = false
 
     var i: int = 2
     while i < arg_count()
@@ -35,13 +36,15 @@ fun main()
         else if equals(arg, "--name") && i + 1 < arg_count()
             i += 1
             name = arg_value(i)
+        else if equals(arg, "--rle")
+            rle = true
         i += 1
 
     if bits != 1 && bits != 2 && bits != 4 && bits != 8
         console.print("Error: --bits must be 1, 2, 4, or 8")
         return
 
-    val ok := convert(input, bits, palette, out_palette, output, name)
+    val ok := convert(input, bits, palette, out_palette, output, name, rle)
     if ok == 0
         console.print("Error: conversion failed")
 
@@ -56,3 +59,4 @@ fun _print_usage()
     console.print("  --out-palette file.png save auto-generated palette as PNG")
     console.print("  --output file.mpd      output file (default: <name>_<bits>bit.mpd)")
     console.print("  --name varname         variable name prefix in generated code")
+    console.print("  --rle                  RLE-compress pixel data (Compress.RLE)")
